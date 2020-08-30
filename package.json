@@ -12,6 +12,7 @@
   "dependencies": {
     "canvas": "^2.6.1",
     "dotenv": "^8.2.0",
+    "say": "^0.16.0",
     "snoowrap": "^1.21.0"
   }
 }
