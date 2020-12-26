@@ -2,6 +2,7 @@ const Snoowrap = require('snoowrap');
 const { createCanvas } = require('canvas');
 const fs = require('fs');
 
+const { exec } = require('child_process');
 const say = require('say');
 
 require('dotenv').config();
@@ -53,33 +54,76 @@ function generateVoiceOver(text, filePath) {
 				console.error(err);
 				reject(err);
 			}
-
-			console.log(`Text has been saved to ${filePath}`);
 			resolve();
 		});
 	});
 }
 
-function generateVideo() {}
+async function generateVideo(threadFilePath) {
+	const script = fs.readFileSync(`${threadFilePath}/script.txt`, 'utf8');
+
+	// currently doesnt split title data
+
+	const threadComments = script.split('[Comment]');
+
+	const commentVideoPromises = [];
+	let fileList = '';
+	for (const [index, comment] of threadComments.entries()) {
+		const [imagePath, audioPath] = comment.match(/'[^']*'(?=[^[']*('[^']*'[^'[]*)*\])/g);
+
+		// disable max line otherwise the command refuses to run
+		commentVideoPromises.push(
+			// eslint-disable-next-line max-len
+			exec(`ffmpeg -loop 1 -i ${imagePath.replace(/'/g, '')} -i ${audioPath.replace(/'/g, '')} -c:v libx264 -tune stillimage -pix_fmt yuv420p -c:a aac -b:a 128k -shortest ${threadFilePath}/video/${index}.mp4`)
+		);
+
+		fileList += `file ${index}.mp4 \n`;
+	}
+
+	fs.writeFileSync(`${threadFilePath}/video/fileList.txt`, fileList);
+
+	await Promise.all(commentVideoPromises);
+	console.log('Comment videos created');
+
+	const concatCommand = `ffmpeg -f concat -safe 0 -i ${threadFilePath}/video/fileList.txt -c copy ${threadFilePath}/final.mp4`;
+	exec(concatCommand, (error, stderr) => {
+		if (error || stderr) return console.error(error || stderr);
+	});
+
+	console.log('Final video created');
+}
+
+/**
+ * @description Authenticate reddit user defined in env variables with Snoowrap
+ * @returns {Snoowrap}
+ */
+function redditAuthentication() {
+	const redditUser = new Snoowrap({
+		userAgent: 'Windows:Video-Maker:1 (by /u/MisinformedEmu)',
+		clientId: process.env.REDDIT_CLIENTID,
+		clientSecret: process.env.REDDIT_CLIENTSECRET,
+		username: process.env.REDDIT_USERNAME,
+		password: process.env.REDDIT_PASSWORD
+	});
+
+	return redditUser;
+}
 
 async function getTopAskRedditThread() {
 	try {
-		const r = new Snoowrap({
-			userAgent: 'Windows:Video-Maker:1 (by /u/MisinformedEmu)',
-			clientId: process.env.REDDIT_CLIENTID,
-			clientSecret: process.env.REDDIT_CLIENTSECRET,
-			username: process.env.REDDIT_USERNAME,
-			password: process.env.REDDIT_PASSWORD
-		});
+		const redditUser = redditAuthentication();
 
-		const subreddit = await r.getSubreddit('askReddit');
+		const subreddit = await redditUser.getSubreddit('askReddit');
 		const [topThread] = await subreddit.getTop({ time: 'today', limit: 1 });
 
 		const threadFolderPath = `./threads/${topThread.id}`;
 		const commentFolderPath = `${threadFolderPath}/comments`;
-		const audoFolderPath = `${commentFolderPath}/audio`;
+		const audioFolderPath = `${threadFolderPath}/audio`;
+		const videoFolderPath = `${threadFolderPath}/video`;
 
-		setupFileStructure([threadFolderPath, commentFolderPath, audoFolderPath]);
+		setupFileStructure([threadFolderPath, commentFolderPath, audioFolderPath, videoFolderPath]);
+
+		console.log('Thread: "%s"', topThread.title);
 
 		const comments = await topThread.comments.fetchMore({ amount: 10, skipReplies: true });
 
@@ -98,8 +142,8 @@ async function getTopAskRedditThread() {
 		const voicePromises = [];
 
 		for (let i = 0; i < comments.length; i += 1) {
-			const imageFilePath = `${commentFolderPath}/${comments[i].id}.png`;
-			const audioFilePath = `${audoFolderPath}/${comments[i].id}.wav`;
+			const imageFilePath = `${commentFolderPath}/${i}.png`;
+			const audioFilePath = `${audioFolderPath}/${i}.wav`;
 			let author = '[Deleted]';
 			if (comments[i].author) {
 				author = comments[i].author.name;
@@ -114,9 +158,12 @@ async function getTopAskRedditThread() {
 			voicePromises.push(generateVoiceOver(content, audioFilePath));
 		}
 
-		await Promise.all(voicePromises).then(() => console.log('All Comments Generated'));
+		await Promise.all(voicePromises);
+		console.log('Comment iamges and audio created');
 
 		fs.writeFileSync(`${threadFolderPath}/script.txt`, script);
+
+		await generateVideo(threadFolderPath);
 	} catch (err) {
 		console.error(err);
 	}
